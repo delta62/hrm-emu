@@ -1,0 +1,10 @@
+[package]
+name = "hrm"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+env_logger = "0.10.0"
+lazy_static = "1.4.0"
+log = "0.4.19"
+regex = "1.9.0"
