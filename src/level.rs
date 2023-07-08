@@ -1,7 +1,16 @@
 use crate::{error::ParseError, program::Value};
 use lazy_static::lazy_static;
+use nom::{
+    branch::alt,
+    bytes::complete::tag,
+    character::complete::{alpha1, digit1},
+    combinator::map_res,
+    error::FromExternalError,
+    sequence::{separated_pair, terminated},
+    IResult,
+};
 use regex::Regex;
-use std::{fs::read_to_string, path::Path, str::FromStr};
+use std::{fs::read_to_string, num::ParseIntError, path::Path, str::FromStr};
 
 #[derive(Debug)]
 pub struct Test {
@@ -31,11 +40,53 @@ impl FromStr for Section {
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "tests:" => Ok(Self::Tests),
-            "goals:" => Ok(Self::Goals),
+            "tests" => Ok(Self::Tests),
+            "goals" => Ok(Self::Goals),
             _ => Err(ParseError::UnexpectedToken(s.to_owned())),
         }
     }
+}
+
+enum Goal {
+    Size(usize),
+    Speed(usize),
+}
+
+impl Goal {
+    fn new(name: &str, value: usize) -> Result<Self, ParseError> {
+        match name {
+            "speed" => Ok(Self::Speed(value)),
+            "size" => Ok(Self::Size(value)),
+            _ => Err(ParseError::UnexpectedToken(name.to_owned())),
+        }
+    }
+}
+
+fn section(input: &str) -> IResult<&str, Section> {
+    map_res(terminated(alpha1, tag(":")), |s: &str| s.parse())(input)
+}
+
+fn goal_size(input: &str) -> Result<usize, ParseIntError> {
+    usize::from_str_radix(input, 10)
+}
+
+fn goal(input: &str) -> IResult<&str, Goal> {
+    let (rest, (name, value)) =
+        separated_pair(alpha1, tag(","), map_res(digit1, goal_size))(input)?;
+
+    let goal = Goal::new(name, value).map_err(|err| {
+        nom::Err::Error(nom::error::Error::from_external_error(
+            input,
+            nom::error::ErrorKind::Alt,
+            err,
+        ))
+    })?;
+
+    Ok((rest, goal))
+}
+
+fn test_case(input: &str) -> IResult<&str, Test> {
+    todo!()
 }
 
 impl LevelFile {
