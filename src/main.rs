@@ -3,37 +3,43 @@ mod level;
 mod program;
 mod solution;
 
-use level::LevelFile;
+use error::ProgramError;
+use level::{Level, Test};
 use program::Program;
 use solution::Solution;
+use std::fs::read_to_string;
 
 fn main() {
     env_logger::init();
 
     let solution = Solution::from_file("programs/02.hrm").unwrap();
     let mut prog = Program::new(&solution);
+    let level: Level = read_to_string("levels/01.level").unwrap().parse().unwrap();
 
-    let level = LevelFile::from_file("levels/01.level").unwrap();
     for test in &level.tests {
-        match prog.run(&test.input) {
-            Err(e) => panic!("{e}"),
-            Ok((cycles, result)) => {
-                let expected = &test.output;
-
-                assert_eq!(result.len(), expected.len());
-                expected.iter().zip(&result).for_each(|(expected, actual)| {
-                    assert_eq!(expected, actual);
-                });
-
-                println!("Success!");
-                println!("Outbox: {:?}", result);
-                println!("Cycles: {cycles} [goal {}]", level.goals.speed);
-                println!(
-                    "Instructions: {} [goal {}]",
-                    solution.len(),
-                    level.goals.size
-                );
-            }
-        }
+        run(&level, &mut prog, &test).unwrap();
     }
+}
+
+fn run(level: &Level, prog: &mut Program, test: &Test) -> Result<(), ProgramError> {
+    let (cycles, result) = prog.run(&test.input)?;
+
+    assert_eq!(result.len(), test.output.len());
+    test.output
+        .iter()
+        .zip(&result)
+        .for_each(|(expected, actual)| {
+            assert_eq!(expected, actual);
+        });
+
+    println!("Success!");
+    println!("Outbox: {:?}", result);
+    println!("Cycles: {cycles} [goal {}]", level.goals.speed);
+    println!(
+        "Instructions: {} [goal {}]",
+        test.input.len(),
+        level.goals.size
+    );
+
+    Ok(())
 }

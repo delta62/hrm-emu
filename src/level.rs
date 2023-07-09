@@ -1,150 +1,243 @@
-use crate::{error::ParseError, program::Value};
-use lazy_static::lazy_static;
+use crate::error::ParseError;
 use nom::{
     branch::alt,
     bytes::complete::tag,
-    character::complete::{alpha1, digit1},
-    combinator::map_res,
-    error::FromExternalError,
-    sequence::{separated_pair, terminated},
-    IResult,
+    character::complete::{alpha1, char, digit1, line_ending, multispace0, space0, space1},
+    combinator::{map, map_res},
+    multi::{many0, separated_list0},
+    sequence::{pair, preceded, terminated, tuple, Tuple},
+    Finish, IResult,
 };
-use regex::Regex;
-use std::{fs::read_to_string, num::ParseIntError, path::Path, str::FromStr};
+use std::{collections::HashMap, num::ParseIntError, str::FromStr};
 
-#[derive(Debug)]
-pub struct Test {
-    pub input: Vec<Value>,
-    pub output: Vec<Value>,
+struct Label<'s>(&'s str);
+
+struct KeyValue<'s>(&'s str, usize);
+
+struct Sequence(Vec<usize>);
+
+struct TestCase {
+    input: Sequence,
+    output: Sequence,
 }
 
-#[derive(Debug)]
+enum Statement<'s> {
+    TestCase(TestCase),
+    KeyValue(KeyValue<'s>),
+}
+
+struct Section<'s> {
+    label: Label<'s>,
+    statements: Vec<Statement<'s>>,
+}
+
+const NO_TEST_CASES: &Vec<Statement<'static>> = &Vec::new();
+
+struct ParseLevel<'s>(HashMap<&'s str, Vec<Statement<'s>>>);
+
+impl<'s> ParseLevel<'s> {
+    fn get_value(&self, section: &str, key: &str) -> Option<usize> {
+        self.0.get(section).and_then(|stmts| {
+            stmts.iter().find_map(|stmt| match stmt {
+                Statement::KeyValue(kv) if kv.0 == key => Some(kv.1),
+                _ => None,
+            })
+        })
+    }
+
+    fn tests(&self, section: &str) -> impl Iterator<Item = &TestCase> {
+        self.0
+            .get(section)
+            .unwrap_or(NO_TEST_CASES)
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Statement::TestCase(tc) => Some(tc),
+                _ => None,
+            })
+    }
+}
+
+fn size(input: &str) -> Result<usize, ParseIntError> {
+    usize::from_str_radix(input, 10)
+}
+
+fn kvp(input: &str) -> IResult<&str, KeyValue<'_>> {
+    let (input, res) = (alpha1, space0, char('='), space0, map_res(digit1, size)).parse(input)?;
+    let pair = KeyValue(res.0, res.4);
+    Ok((input, pair))
+}
+
+fn number_list(input: &str) -> IResult<&str, Vec<usize>> {
+    separated_list0(space1, map_res(digit1, size))(input)
+}
+
+fn sequence(input: &str) -> IResult<&str, Sequence> {
+    let (input, res) = (char('['), space0, number_list, space0, char(']')).parse(input)?;
+    Ok((input, Sequence(res.2)))
+}
+
+fn test_case(input: &str) -> IResult<&str, TestCase> {
+    let (input, res) = (sequence, space0, tag("->"), space0, sequence).parse(input)?;
+    let tc = TestCase {
+        input: res.0,
+        output: res.4,
+    };
+
+    Ok((input, tc))
+}
+
+fn label(input: &str) -> IResult<&str, Label<'_>> {
+    preceded(
+        multispace0,
+        terminated(map(alpha1, Label), tuple((char(':'), line_ending))),
+    )(input)
+}
+
+fn statement(input: &str) -> IResult<&str, Statement<'_>> {
+    preceded(
+        multispace0,
+        terminated(
+            alt((
+                map(kvp, Statement::KeyValue),
+                map(test_case, Statement::TestCase),
+            )),
+            line_ending,
+        ),
+    )(input)
+}
+
+fn section(input: &str) -> IResult<&str, Section<'_>> {
+    map(pair(label, many0(statement)), |(label, statements)| {
+        Section { label, statements }
+    })(input)
+}
+
+fn level(input: &str) -> IResult<&str, ParseLevel<'_>> {
+    let (input, sections) = terminated(many0(section), multispace0)(input)?;
+
+    let mut lvl = HashMap::with_capacity(sections.len());
+    for section in sections {
+        let key = section.label.0;
+        if lvl.contains_key(key) {
+            Err(nom::Err::Error(nom::error::Error::new(
+                "",
+                nom::error::ErrorKind::OneOf,
+            )))?;
+        }
+
+        lvl.insert(key, section.statements);
+    }
+
+    let level = ParseLevel(lvl);
+    Ok((input, level))
+}
+
+#[derive(Debug, Default)]
+pub struct Test {
+    pub input: Vec<usize>,
+    pub output: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
 pub struct Goals {
     pub size: usize,
     pub speed: usize,
 }
 
-#[derive(Debug)]
-pub struct LevelFile {
-    pub tests: Vec<Test>,
+#[derive(Debug, Default)]
+pub struct Level {
     pub goals: Goals,
+    pub tests: Vec<Test>,
 }
 
-enum Section {
-    Tests,
-    Goals,
-}
-
-impl FromStr for Section {
+impl FromStr for Level {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "tests" => Ok(Self::Tests),
-            "goals" => Ok(Self::Goals),
-            _ => Err(ParseError::UnexpectedToken(s.to_owned())),
+        let (input, level) = level(s)
+            .finish()
+            .map_err(|_| ParseError::UnexpectedToken("x".to_owned()))?;
+
+        if !input.is_empty() {
+            Err(ParseError::UnexpectedToken(input.to_owned()))?;
         }
+
+        let size = level.get_value("goals", "size").unwrap();
+        let speed = level.get_value("goals", "speed").unwrap();
+        let goals = Goals { size, speed };
+
+        let tests = level
+            .tests("tests")
+            .map(|t| Test {
+                input: t.input.0.clone(),
+                output: t.output.0.clone(),
+            })
+            .collect();
+
+        Ok(Level { goals, tests })
     }
 }
 
-enum Goal {
-    Size(usize),
-    Speed(usize),
-}
+#[cfg(test)]
+mod test {
+    use super::*;
 
-impl Goal {
-    fn new(name: &str, value: usize) -> Result<Self, ParseError> {
-        match name {
-            "speed" => Ok(Self::Speed(value)),
-            "size" => Ok(Self::Size(value)),
-            _ => Err(ParseError::UnexpectedToken(name.to_owned())),
-        }
+    type TestResult = Result<(), nom::Err<nom::error::Error<&'static str>>>;
+
+    macro_rules! parse_all {
+        ($fn:expr, $input:literal) => {{
+            let (rest, result) = $fn($input)?;
+            assert!(rest.is_empty(), "Some input was unused: {rest}");
+            result
+        }};
     }
-}
 
-fn section(input: &str) -> IResult<&str, Section> {
-    map_res(terminated(alpha1, tag(":")), |s: &str| s.parse())(input)
-}
+    #[test]
+    fn parses_number() -> Result<(), ParseIntError> {
+        let res = size("42")?;
+        assert_eq!(res, 42);
 
-fn goal_size(input: &str) -> Result<usize, ParseIntError> {
-    usize::from_str_radix(input, 10)
-}
-
-fn goal(input: &str) -> IResult<&str, Goal> {
-    let (rest, (name, value)) =
-        separated_pair(alpha1, tag(","), map_res(digit1, goal_size))(input)?;
-
-    let goal = Goal::new(name, value).map_err(|err| {
-        nom::Err::Error(nom::error::Error::from_external_error(
-            input,
-            nom::error::ErrorKind::Alt,
-            err,
-        ))
-    })?;
-
-    Ok((rest, goal))
-}
-
-fn test_case(input: &str) -> IResult<&str, Test> {
-    todo!()
-}
-
-impl LevelFile {
-    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ParseError> {
-        let s = read_to_string(path).map_err(ParseError::IoError)?;
-        s.parse()
+        Ok(())
     }
-}
 
-impl FromStr for LevelFile {
-    type Err = ParseError;
+    #[test]
+    fn parses_label() -> TestResult {
+        let label = parse_all!(label, "tests:\n");
+        assert_eq!(label.0, "tests");
+        Ok(())
+    }
 
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        lazy_static! {
-            static ref SECTION_PATTERN: Regex = Regex::new("^[A-Za-z]:$").unwrap();
-            static ref IO_PATTERN: Regex = Regex::new(r"^\[\s*(?:(\d+),\s*)+\]$").unwrap();
-        }
+    #[test]
+    fn parses_number_list() -> TestResult {
+        let list = parse_all!(number_list, "1 2 3");
+        assert_eq!(list, vec![1, 2, 3]);
+        Ok(())
+    }
 
-        let lines = s
-            .lines()
-            .filter(|line| !line.is_empty())
-            .map(|line| line.trim());
+    #[test]
+    fn parses_sequence() -> TestResult {
+        let list = parse_all!(sequence, "[ 1 2 3 ]");
+        assert_eq!(list.0, vec![1, 2, 3]);
+        Ok(())
+    }
 
-        let mut tests = Vec::new();
-        let mut goals = Goals { size: 0, speed: 0 };
-        let mut current_section: Option<Section> = None;
+    #[test]
+    fn parses_test_case() -> TestResult {
+        let test = parse_all!(test_case, "[ 1 2 3 ] -> [ 3 2 1 ]");
 
-        for line in lines {
-            println!("Line '{line}'");
-            if SECTION_PATTERN.is_match(line) {
-                println!("section match");
-                current_section = Some(line.parse()?);
-                continue;
-            }
+        assert_eq!(test.input.0, vec![1, 2, 3]);
+        assert_eq!(test.output.0, vec![3, 2, 1]);
 
-            println!("non-section match");
+        Ok(())
+    }
 
-            match current_section {
-                Some(Section::Tests) => {
-                    // [ 1, 2, 3 ] -> [ 4, 5, 6 ]
-                    let (input, output) = line.split_once("->").unwrap();
-                    let input = IO_PATTERN.captures(input).unwrap();
-                    println!("{:?}", input);
-                    todo!();
-                }
-                Some(Section::Goals) => {
-                    let mut tokens = line.split('=').map(|t| t.trim());
-                    match tokens.next() {
-                        Some("size") => goals.size = tokens.next().unwrap().parse().unwrap(),
-                        Some("speed") => goals.speed = tokens.next().unwrap().parse().unwrap(),
-                        Some(_) => unimplemented!(),
-                        None => unimplemented!(),
-                    }
-                }
-                None => Err(ParseError::UnexpectedToken(line.to_owned()))?,
-            }
-        }
+    #[test]
+    fn parses_key_value() -> TestResult {
+        let pair = parse_all!(kvp, "key = 42");
 
-        Ok(Self { tests, goals })
+        assert_eq!(pair.0, "key");
+        assert_eq!(pair.1, 42);
+
+        Ok(())
     }
 }
